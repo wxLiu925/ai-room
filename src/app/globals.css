@@ -206,3 +206,82 @@ h2 {
     padding: 32px;
   }
 }
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.createForm,
+.composer {
+  display: grid;
+  gap: 14px;
+  margin-top: 32px;
+}
+
+.createForm label {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel-soft);
+  color: var(--text);
+  outline: none;
+  padding: 15px 16px;
+}
+
+input:focus {
+  border-color: rgba(196, 255, 77, 0.64);
+}
+
+.formError {
+  margin: 0;
+  color: #ff8f70;
+}
+
+.centered {
+  display: grid;
+  place-items: center;
+}
+
+.narrowPanel {
+  max-width: 520px;
+}
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  padding-top: 18px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.actionButton {
+  margin-top: 24px;
+}
+
+.eventList {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  color: var(--muted);
+}
