@@ -1,5 +1,7 @@
 import { RoomClient } from "@/app/components/room-client";
-import { getRoom } from "@/domain/store";
+import { WerewolfClient } from "@/app/components/werewolf-client";
+import { getProviderClientConfig } from "@/domain/provider";
+import { getRoom } from "@/domain/room-store";
 import { notFound } from "next/navigation";
 
 type RoomPageProps = {
@@ -10,11 +12,15 @@ type RoomPageProps = {
 
 export default async function RoomPage({ params }: RoomPageProps) {
   const { roomId } = await params;
-  const room = getRoom(roomId);
+  const room = await getRoom(roomId);
 
   if (!room) {
     notFound();
   }
 
-  return <RoomClient initialRoom={room} />;
+  if (room.room.mode === "werewolf") {
+    return <WerewolfClient initialRoom={room} providerConfig={getProviderClientConfig()} />;
+  }
+
+  return <RoomClient initialRoom={room} providerConfig={getProviderClientConfig()} />;
 }

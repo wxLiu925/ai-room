@@ -1,4 +1,5 @@
-export type RoomMode = "discussion" | "game";
+export type AgentProvider = "mock" | "openai" | "deepseek" | "gemini" | "grok" | "qwen";
+export type RoomMode = "discussion" | "werewolf";
 export type RoomStatus = "open" | "running" | "archived";
 export type ParticipantKind = "human" | "ai";
 export type ParticipantStatus = "online" | "offline" | "thinking" | "speaking" | "completed" | "failed";
@@ -22,7 +23,7 @@ export type Agent = {
   role: string;
   persona: string;
   goal: string;
-  provider: "mock";
+  provider: AgentProvider;
   model: string;
   temperature: number;
   enabled: boolean;

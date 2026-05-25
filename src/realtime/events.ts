@@ -1,3 +1,5 @@
+import { sanitizeForViewer } from "@/domain/game-store";
+import type { GameSession } from "@/domain/game-types";
 import type { RoomEvent, RoomView } from "@/domain/types";
 
 type RealtimeGateway = {
@@ -13,9 +15,19 @@ export type RoomRealtimePayload = {
   events: RoomEvent[];
 };
 
+export type GameRealtimePayload = {
+  session: GameSession;
+};
+
 export function emitRoomUpdated(room: RoomView, afterSeq = 0) {
   globalThis.aiRoomRealtime?.emitRoom(room.room.id, "room:updated", {
     room,
     events: room.events.filter((event) => event.seq > afterSeq),
   } satisfies RoomRealtimePayload);
+}
+
+export function emitGameUpdated(session: GameSession) {
+  globalThis.aiRoomRealtime?.emitRoom(session.roomId, "game:updated", {
+    session: sanitizeForViewer(session),
+  } satisfies GameRealtimePayload);
 }

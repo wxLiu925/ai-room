@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRoom, startDiscussion } from "@/domain/store";
+import { getRoom, startDiscussion } from "@/domain/room-store";
 import { emitRoomUpdated } from "@/realtime/events";
 
 type RouteContext = {
@@ -8,7 +8,7 @@ type RouteContext = {
 
 export async function POST(_request: Request, { params }: RouteContext) {
   const { roomId } = await params;
-  const current = getRoom(roomId);
+  const current = await getRoom(roomId);
 
   if (!current) {
     return NextResponse.json({ error: "room_not_found" }, { status: 404 });
@@ -18,7 +18,7 @@ export async function POST(_request: Request, { params }: RouteContext) {
     return NextResponse.json({ error: "agent_required" }, { status: 409 });
   }
 
-  const room = startDiscussion(roomId);
+  const room = await startDiscussion(roomId);
 
   if (!room) {
     return NextResponse.json({ error: "room_not_found" }, { status: 404 });

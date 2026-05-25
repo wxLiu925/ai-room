@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRoom } from "@/domain/store";
+import { getRoom } from "@/domain/room-store";
 
 type RouteContext = {
   params: Promise<{ roomId: string }>;
@@ -7,7 +7,7 @@ type RouteContext = {
 
 export async function GET(request: Request, { params }: RouteContext) {
   const { roomId } = await params;
-  const room = getRoom(roomId);
+  const room = await getRoom(roomId);
 
   if (!room) {
     return NextResponse.json({ error: "room_not_found" }, { status: 404 });

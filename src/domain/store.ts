@@ -1,5 +1,13 @@
-import { mockReply } from "./mock-provider";
-import type { Agent, Message, Participant, ParticipantStatus, Room, RoomEvent, RoomView } from "./types";
+import { defaultModelForProvider, generateAgentReply, getProviderPublicConfig, normalizeProvider, providerMetadata } from "./provider";
+import type { Agent, Message, Participant, ParticipantStatus, Room, RoomEvent, RoomMode, RoomView } from "./types";
+
+export const ROOM_LIMITS = {
+  title: 80,
+  name: 40,
+  role: 40,
+  profile: 400,
+  message: 2000,
+} as const;
 
 type State = {
   rooms: Map<string, Room>;
@@ -7,22 +15,43 @@ type State = {
   participants: Map<string, Participant[]>;
   messages: Map<string, Message[]>;
   events: Map<string, RoomEvent[]>;
-  seq: Map<string, number>;
+  eventSeq: Map<string, number>;
+  messageSeq: Map<string, number>;
+};
+
+type LegacyState = Omit<State, "eventSeq" | "messageSeq"> & {
+  seq?: Map<string, number>;
+  eventSeq?: Map<string, number>;
+  messageSeq?: Map<string, number>;
 };
 
 type StoreGlobal = typeof globalThis & {
-  aiRoomStore?: State;
+  aiRoomStore?: LegacyState;
 };
 
 const globalStore = globalThis as StoreGlobal;
+const existingState = globalStore.aiRoomStore;
+const existingMessages = existingState?.messages ?? new Map<string, Message[]>();
+const existingEvents = existingState?.events ?? new Map<string, RoomEvent[]>();
+const existingEventSeq = new Map(
+  Array.from(existingEvents.entries()).map(([roomId, events]) => [roomId, Math.max(0, ...events.map((event) => event.seq))]),
+);
 
-const state = globalStore.aiRoomStore ?? {
-  rooms: new Map<string, Room>(),
-  agents: new Map<string, Agent>(),
-  participants: new Map<string, Participant[]>(),
-  messages: new Map<string, Message[]>(),
-  events: new Map<string, RoomEvent[]>(),
-  seq: new Map<string, number>(),
+const state: State = {
+  rooms: existingState?.rooms ?? new Map<string, Room>(),
+  agents: existingState?.agents ?? new Map<string, Agent>(),
+  participants: existingState?.participants ?? new Map<string, Participant[]>(),
+  messages: existingMessages,
+  events: existingEvents,
+  eventSeq: existingState?.eventSeq ?? existingEventSeq,
+  messageSeq:
+    existingState?.messageSeq ??
+    new Map(
+      Array.from(existingMessages.entries()).map(([roomId, messages]) => [
+        roomId,
+        Math.max(0, ...messages.map((message) => message.seq)),
+      ]),
+    ),
 };
 
 globalStore.aiRoomStore = state;
@@ -35,17 +64,27 @@ function id(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-function nextSeq(roomId: string) {
-  const seq = (state.seq.get(roomId) ?? 0) + 1;
-  state.seq.set(roomId, seq);
+function nextEventSeq(roomId: string) {
+  const seq = (state.eventSeq.get(roomId) ?? 0) + 1;
+  state.eventSeq.set(roomId, seq);
   return seq;
+}
+
+function nextMessageSeq(roomId: string) {
+  const seq = (state.messageSeq.get(roomId) ?? 0) + 1;
+  state.messageSeq.set(roomId, seq);
+  return seq;
+}
+
+function cleanText(value: string | undefined, maxLength: number) {
+  return (value ?? "").trim().slice(0, maxLength);
 }
 
 function event(roomId: string, type: string, payload: Record<string, unknown>, actorId?: string) {
   const item: RoomEvent = {
     id: id("event"),
     roomId,
-    seq: nextSeq(roomId),
+    seq: nextEventSeq(roomId),
     type,
     actorId,
     payload,
@@ -61,13 +100,16 @@ function view(roomId: string): RoomView | undefined {
 
   const participants = state.participants.get(roomId) ?? [];
   const agentIds = participants.map((participant) => participant.agentId).filter(Boolean) as string[];
+  const agents = agentIds.map((agentId) => state.agents.get(agentId)).filter(Boolean) as Agent[];
+  const messages = state.messages.get(roomId) ?? [];
+  const events = state.events.get(roomId) ?? [];
 
   return {
-    room,
-    participants,
-    agents: agentIds.map((agentId) => state.agents.get(agentId)).filter(Boolean) as Agent[],
-    messages: state.messages.get(roomId) ?? [],
-    events: state.events.get(roomId) ?? [],
+    room: { ...room },
+    participants: participants.map((participant) => ({ ...participant })),
+    agents: agents.map((agent) => ({ ...agent })),
+    messages: messages.map((message) => ({ ...message, metadata: { ...message.metadata } })),
+    events: events.map((item) => ({ ...item, payload: { ...item.payload } })),
   };
 }
 
@@ -80,19 +122,21 @@ function updateParticipant(roomId: string, participantId: string, status: Partic
 }
 
 export function listRooms() {
-  return Array.from(state.rooms.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return Array.from(state.rooms.values())
+    .map((room) => ({ ...room }))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export function getRoom(roomId: string) {
   return view(roomId);
 }
 
-export function createRoom(input: { title: string; ownerName?: string }) {
+export function createRoom(input: { title: string; ownerName?: string; mode?: RoomMode }) {
   const createdAt = now();
   const room: Room = {
     id: id("room"),
-    title: input.title.trim(),
-    mode: "discussion",
+    title: cleanText(input.title, ROOM_LIMITS.title) || "未命名讨论室",
+    mode: input.mode === "werewolf" ? "werewolf" : "discussion",
     status: "open",
     ownerId: "local-user",
     createdAt,
@@ -104,7 +148,7 @@ export function createRoom(input: { title: string; ownerName?: string }) {
     roomId: room.id,
     kind: "human",
     userId: room.ownerId,
-    name: input.ownerName?.trim() || "用户",
+    name: cleanText(input.ownerName, ROOM_LIMITS.name) || "用户",
     status: "online",
     createdAt,
   };
@@ -113,25 +157,31 @@ export function createRoom(input: { title: string; ownerName?: string }) {
   state.participants.set(room.id, [host]);
   state.messages.set(room.id, []);
   state.events.set(room.id, []);
-  state.seq.set(room.id, 0);
+  state.eventSeq.set(room.id, 0);
+  state.messageSeq.set(room.id, 0);
   event(room.id, "room.created", { roomId: room.id, title: room.title }, host.id);
 
   return view(room.id) as RoomView;
 }
 
-export function addAgent(roomId: string, input: { name: string; role: string; persona?: string; goal?: string }) {
+export function addAgent(
+  roomId: string,
+  input: { name: string; role: string; persona?: string; goal?: string; provider?: string; model?: string },
+) {
   const room = state.rooms.get(roomId);
   if (!room) return undefined;
 
   const createdAt = now();
+  const provider = normalizeProvider(input.provider ?? getProviderPublicConfig().defaultProvider);
+  const model = cleanText(input.model, ROOM_LIMITS.name) || defaultModelForProvider(provider);
   const agent: Agent = {
     id: id("agent"),
-    name: input.name.trim(),
-    role: input.role.trim(),
-    persona: input.persona?.trim() || "保持清晰、直接、基于角色职责发言。",
-    goal: input.goal?.trim() || "帮助房间推进讨论。",
-    provider: "mock",
-    model: "mock-v1",
+    name: cleanText(input.name, ROOM_LIMITS.name),
+    role: cleanText(input.role, ROOM_LIMITS.role),
+    persona: cleanText(input.persona, ROOM_LIMITS.profile) || "保持清晰、直接、基于角色职责发言。",
+    goal: cleanText(input.goal, ROOM_LIMITS.profile) || "帮助房间推进讨论。",
+    provider,
+    model,
     temperature: 0.4,
     enabled: true,
   };
@@ -157,6 +207,9 @@ export function addMessage(roomId: string, input: { content: string; senderId?: 
   const room = state.rooms.get(roomId);
   if (!room) return undefined;
 
+  const content = cleanText(input.content, ROOM_LIMITS.message);
+  if (!content) return undefined;
+
   const createdAt = now();
   const message: Message = {
     id: id("message"),
@@ -164,9 +217,9 @@ export function addMessage(roomId: string, input: { content: string; senderId?: 
     senderKind: "human",
     senderId: input.senderId || "local-user",
     type: "text",
-    content: input.content.trim(),
+    content,
     status: "completed",
-    seq: nextSeq(roomId),
+    seq: nextMessageSeq(roomId),
     metadata: {},
     createdAt,
   };
@@ -178,7 +231,7 @@ export function addMessage(roomId: string, input: { content: string; senderId?: 
   return view(roomId) as RoomView;
 }
 
-export function startDiscussion(roomId: string) {
+export async function startDiscussion(roomId: string) {
   const room = state.rooms.get(roomId);
   if (!room) return undefined;
 
@@ -203,6 +256,7 @@ export function startDiscussion(roomId: string) {
     updateParticipant(roomId, participant.id, "speaking");
     event(roomId, "agent.speaking", { agentId: agent.id, name: agent.name, round }, participant.id);
 
+    const result = await generateAgentReply(agent, nextMessages, round);
     const createdAt = now();
     const message: Message = {
       id: id("message"),
@@ -210,17 +264,28 @@ export function startDiscussion(roomId: string) {
       senderKind: "ai",
       senderId: participant.id,
       type: "text",
-      content: mockReply(agent, nextMessages, round),
-      status: "completed",
-      seq: nextSeq(roomId),
-      metadata: { agentId: agent.id, round },
+      content: result.text,
+      status: result.status,
+      seq: nextMessageSeq(roomId),
+      metadata: providerMetadata(result, { agentId: agent.id, round }),
       createdAt,
     };
 
     nextMessages.push(message);
-    event(roomId, "message.created", { messageId: message.id, agentId: agent.id, round }, participant.id);
-    updateParticipant(roomId, participant.id, "completed");
-    event(roomId, "agent.completed", { agentId: agent.id, name: agent.name, round }, participant.id);
+    event(roomId, "message.created", { messageId: message.id, agentId: agent.id, round, provider: result.provider }, participant.id);
+    updateParticipant(roomId, participant.id, result.status === "completed" ? "completed" : "failed");
+    event(
+      roomId,
+      result.status === "completed" ? "agent.completed" : "agent.failed",
+      {
+        agentId: agent.id,
+        name: agent.name,
+        round,
+        provider: result.provider,
+        error: result.error,
+      },
+      participant.id,
+    );
   }
 
   state.messages.set(roomId, nextMessages);

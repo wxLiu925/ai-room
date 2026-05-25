@@ -1,0 +1,89 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Room {
+  id         String        @id
+  title      String
+  mode       String
+  status     String
+  ownerId    String
+  eventSeq   Int           @default(0)
+  messageSeq Int           @default(0)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  participants Participant[]
+  messages     Message[]
+  events       RoomEvent[]
+
+  @@index([createdAt])
+}
+
+model Agent {
+  id          String        @id
+  name        String
+  role        String
+  persona     String
+  goal        String
+  provider    String
+  model       String
+  temperature Float
+  enabled     Boolean       @default(true)
+
+  participants Participant[]
+}
+
+model Participant {
+  id        String   @id
+  roomId    String
+  kind      String
+  userId    String?
+  agentId   String?
+  name      String
+  status    String
+  createdAt DateTime @default(now())
+
+  room  Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  agent Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([roomId])
+  @@index([agentId])
+}
+
+model Message {
+  id         String   @id
+  roomId     String
+  senderKind String
+  senderId   String?
+  type       String
+  content    String
+  status     String
+  seq        Int
+  metadata   Json
+  createdAt  DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, seq])
+  @@index([roomId, createdAt])
+}
+
+model RoomEvent {
+  id        String   @id
+  roomId    String
+  seq       Int
+  type      String
+  actorId   String?
+  payload   Json
+  createdAt DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, seq])
+  @@index([roomId, createdAt])
+}
