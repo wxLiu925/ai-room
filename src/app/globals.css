@@ -627,11 +627,27 @@ h3 {
   gap: 10px;
   padding: 7px 8px;
   border-radius: var(--radius-sm);
-  transition: background 0.12s;
+  transition: background 0.12s, border-color 0.12s;
+  border: 1px solid transparent;
 }
 
 .member:hover {
   background: var(--bg-hover);
+}
+
+.memberClickable {
+  cursor: pointer;
+}
+
+.memberClickable:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+}
+
+.memberSelected,
+.memberSelected:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
 }
 
 .avatar {
@@ -880,6 +896,18 @@ h3 {
 .agentForm {
   display: grid;
   gap: 10px;
+}
+
+.agentFormActions {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.paneActionInline {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .actionButton {
@@ -1187,6 +1215,83 @@ h3 {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--bg-soft);
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.ww-seatClickable {
+  cursor: pointer;
+}
+
+.ww-seatClickable:hover {
+  background: var(--bg-hover);
+}
+
+.ww-seatClickable:focus-visible {
+  outline: none;
+  border-color: var(--accent-border);
+}
+
+.ww-seatSelected,
+.ww-seatSelected:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.ww-seatInfo {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ww-seatProvider {
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.ww-playerProvider {
+  color: var(--text-faint);
+}
+
+.ww-notice {
+  font-size: 12px;
+  color: var(--warning);
+  margin-top: 6px;
+}
+
+.ww-editorOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 9, 14, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.ww-editorCard {
+  width: min(440px, 100%);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  display: grid;
+  gap: 14px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.ww-editorHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ww-editorHeader h3 {
+  font-size: 15px;
+  margin: 0;
 }
 
 .ww-seat span {

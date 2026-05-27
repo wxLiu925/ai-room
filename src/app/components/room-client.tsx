@@ -5,7 +5,7 @@ import type { ComponentProps } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import type { ProviderClientConfig } from "@/domain/provider";
-import type { Message, Participant, RoomEvent, RoomView } from "@/domain/types";
+import type { Agent, Message, Participant, RoomEvent, RoomView } from "@/domain/types";
 
 type FormSubmitEvent = Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0];
 
@@ -23,11 +23,77 @@ type RoomSnapshot = RoomView & {
   missingEvents?: RoomEvent[];
 };
 
-const defaultAgents = [
-  { name: "主持人 AI", role: "主持人", persona: "控制节奏，追问关键分歧，最后收束结论。" },
-  { name: "工程师 AI", role: "工程师", persona: "关注实现路径、技术风险、边界条件和交付成本。" },
-  { name: "反方评审 AI", role: "反方评审", persona: "主动寻找薄弱假设、失败场景和反例。" },
+type PersonaTemplate = {
+  id: string;
+  label: string;
+  name: string;
+  role: string;
+  persona: string;
+  goal: string;
+};
+
+const personaTemplates: PersonaTemplate[] = [
+  { id: "blank", label: "自定义（清空）", name: "", role: "", persona: "", goal: "" },
+  {
+    id: "host",
+    label: "🎙 主持人 · 控场",
+    name: "主持人 AI",
+    role: "主持人",
+    persona: "控制节奏，追问关键分歧，最后收束结论。",
+    goal: "推动讨论按既定议题逐步收敛。",
+  },
+  {
+    id: "engineer",
+    label: "🛠 工程师 · 落地视角",
+    name: "工程师 AI",
+    role: "工程师",
+    persona: "关注实现路径、技术风险、边界条件和交付成本。",
+    goal: "把方案拆解为可执行的实现步骤。",
+  },
+  {
+    id: "skeptic",
+    label: "🧪 反方评审 · 找漏洞",
+    name: "反方评审 AI",
+    role: "反方评审",
+    persona: "主动寻找薄弱假设、失败场景和反例。",
+    goal: "暴露方案中尚未被讨论的风险。",
+  },
+  {
+    id: "pm",
+    label: "📋 产品经理 · 用户视角",
+    name: "产品经理 AI",
+    role: "产品经理",
+    persona: "从用户旅程和场景价值出发，关注体验和优先级。",
+    goal: "确保方案对真实用户产生可感知的价值。",
+  },
+  {
+    id: "researcher",
+    label: "🔬 研究员 · 数据驱动",
+    name: "研究员 AI",
+    role: "研究员",
+    persona: "引用具体数据、调研结论或学术参考，谨慎下结论。",
+    goal: "用证据校准讨论中的主观判断。",
+  },
+  {
+    id: "creative",
+    label: "🎨 创意 · 发散思维",
+    name: "创意 AI",
+    role: "创意",
+    persona: "提出非常规思路、类比和跨域联想，鼓励重新框定问题。",
+    goal: "拓宽解决空间，避免讨论陷入单一路径。",
+  },
 ];
+
+const quickAddRotation = personaTemplates.filter((entry) => entry.id !== "blank").slice(0, 3);
+
+type AgentDraft = {
+  name: string;
+  role: string;
+  persona: string;
+  goal: string;
+  provider: string;
+  model: string;
+};
 
 const statusLabels: Record<string, string> = {
   online: "在线",
@@ -83,23 +149,58 @@ function avatarLetter(name: string) {
   return name.trim().slice(0, 1).toUpperCase() || "?";
 }
 
+function templateMatchesAgent(template: PersonaTemplate, agent: Agent) {
+  return (
+    template.id !== "blank" &&
+    template.name === agent.name &&
+    template.role === agent.role &&
+    template.persona === agent.persona &&
+    template.goal === agent.goal
+  );
+}
+
 export function RoomClient({ initialRoom, providerConfig }: RoomClientProps) {
   const [room, setRoom] = useState<RoomView>(initialRoom);
   const [error, setError] = useState("");
-  const [agentIndex, setAgentIndex] = useState(0);
-  const [agentName, setAgentName] = useState("主持人 AI");
-  const [agentRole, setAgentRole] = useState("主持人");
-  const [agentPersona, setAgentPersona] = useState("控制节奏，追问关键分歧，最后收束结论。");
-  const [agentProvider, setAgentProvider] = useState(providerConfig.defaultProvider);
-  const providerDescriptor = useMemo(
-    () => providerConfig.providers.find((entry) => entry.id === agentProvider) ?? providerConfig.providers[0],
-    [agentProvider, providerConfig.providers],
+  const [quickAddIndex, setQuickAddIndex] = useState(0);
+
+  const defaultProvider = providerConfig.defaultProvider;
+  const defaultProviderEntry = useMemo(
+    () => providerConfig.providers.find((entry) => entry.id === defaultProvider) ?? providerConfig.providers[0],
+    [defaultProvider, providerConfig.providers],
   );
-  const [agentModel, setAgentModel] = useState(providerDescriptor?.defaultModel ?? "");
+
+  const initialTemplate = personaTemplates[1];
+  const [createTemplateId, setCreateTemplateId] = useState<string>(initialTemplate.id);
+  const [createDraft, setCreateDraft] = useState<AgentDraft>({
+    name: initialTemplate.name,
+    role: initialTemplate.role,
+    persona: initialTemplate.persona,
+    goal: initialTemplate.goal,
+    provider: defaultProvider,
+    model: defaultProviderEntry?.defaultModel ?? "",
+  });
+  const createProviderEntry = useMemo(
+    () => providerConfig.providers.find((entry) => entry.id === createDraft.provider) ?? providerConfig.providers[0],
+    [createDraft.provider, providerConfig.providers],
+  );
+
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<AgentDraft | null>(null);
+  const [editTemplateId, setEditTemplateId] = useState<string>("blank");
+  const editProviderEntry = useMemo(
+    () =>
+      editDraft
+        ? providerConfig.providers.find((entry) => entry.id === editDraft.provider) ?? providerConfig.providers[0]
+        : null,
+    [editDraft, providerConfig.providers],
+  );
+
   const [discussionGoal, setDiscussionGoal] = useState("围绕当前方案做第一轮可执行评审。");
   const [message, setMessage] = useState("请围绕这个方案给出第一轮意见。");
   const [pending, setPending] = useState(false);
   const [copied, setCopied] = useState(false);
+
   const socketRef = useRef<Socket | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const lastSeqRef = useRef(Math.max(0, ...initialRoom.events.map((event) => event.seq)));
@@ -116,6 +217,18 @@ export function RoomClient({ initialRoom, providerConfig }: RoomClientProps) {
     const order: Record<string, number> = { speaking: 0, thinking: 1, online: 2, completed: 3, offline: 4, failed: 5 };
     return [...room.participants].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
   }, [room.participants]);
+
+  const selectedAgent = useMemo(
+    () => (selectedAgentId ? room.agents.find((agent) => agent.id === selectedAgentId) ?? null : null),
+    [selectedAgentId, room.agents],
+  );
+
+  useEffect(() => {
+    if (selectedAgentId && !selectedAgent) {
+      setSelectedAgentId(null);
+      setEditDraft(null);
+    }
+  }, [selectedAgentId, selectedAgent]);
 
   const applyRoom = useCallback((nextRoom: RoomView) => {
     const nextSeq = lastEventSeq(nextRoom.events);
@@ -170,7 +283,70 @@ export function RoomClient({ initialRoom, providerConfig }: RoomClientProps) {
     return agent?.name ?? participant?.name ?? "AI";
   }
 
-  async function createAgent(input: { name: string; role: string; persona?: string; provider?: string; model?: string }) {
+  function applyCreateTemplate(templateId: string) {
+    setCreateTemplateId(templateId);
+    const template = personaTemplates.find((entry) => entry.id === templateId);
+    if (!template || template.id === "blank") {
+      if (template?.id === "blank") {
+        setCreateDraft((prev) => ({ ...prev, name: "", role: "", persona: "", goal: "" }));
+      }
+      return;
+    }
+    setCreateDraft((prev) => ({
+      ...prev,
+      name: template.name,
+      role: template.role,
+      persona: template.persona,
+      goal: template.goal,
+    }));
+  }
+
+  function applyEditTemplate(templateId: string) {
+    setEditTemplateId(templateId);
+    if (!editDraft) return;
+    const template = personaTemplates.find((entry) => entry.id === templateId);
+    if (!template || template.id === "blank") return;
+    setEditDraft({
+      ...editDraft,
+      name: template.name,
+      role: template.role,
+      persona: template.persona,
+      goal: template.goal,
+    });
+  }
+
+  function selectMember(participant: Participant) {
+    if (participant.kind !== "ai" || !participant.agentId) return;
+    const agent = room.agents.find((entry) => entry.id === participant.agentId);
+    if (!agent) return;
+    setSelectedAgentId(agent.id);
+    setEditDraft({
+      name: agent.name,
+      role: agent.role,
+      persona: agent.persona,
+      goal: agent.goal,
+      provider: agent.provider,
+      model: agent.model,
+    });
+    const matched = personaTemplates.find((entry) => templateMatchesAgent(entry, agent));
+    setEditTemplateId(matched?.id ?? "blank");
+    setError("");
+  }
+
+  function cancelEdit() {
+    setSelectedAgentId(null);
+    setEditDraft(null);
+    setEditTemplateId("blank");
+  }
+
+  async function createAgent(input: {
+    name: string;
+    role: string;
+    persona?: string;
+    goal?: string;
+    provider?: string;
+    model?: string;
+  }) {
     setError("");
     setPending(true);
 
@@ -199,22 +375,77 @@ export function RoomClient({ initialRoom, providerConfig }: RoomClientProps) {
   }
 
   async function addNextAgent() {
-    const agent = defaultAgents[agentIndex % defaultAgents.length];
-    await createAgent({ ...agent, provider: agentProvider, model: agentModel.trim() || undefined });
-    setAgentIndex((value) => value + 1);
+    const template = quickAddRotation[quickAddIndex % quickAddRotation.length];
+    await createAgent({
+      name: template.name,
+      role: template.role,
+      persona: template.persona,
+      goal: template.goal,
+      provider: createDraft.provider,
+      model: createDraft.model.trim() || undefined,
+    });
+    setQuickAddIndex((value) => value + 1);
   }
 
   async function addCustomAgent(event: FormSubmitEvent) {
     event.preventDefault();
-    const name = agentName.trim();
-    const role = agentRole.trim();
-    const persona = agentPersona.trim();
+    const name = createDraft.name.trim();
+    const role = createDraft.role.trim();
 
     if (!name || !role) {
       setError("AI 名称和角色不能为空");
       return;
     }
-    await createAgent({ name, role, persona, provider: agentProvider, model: agentModel.trim() || undefined });
+    await createAgent({
+      name,
+      role,
+      persona: createDraft.persona.trim(),
+      goal: createDraft.goal.trim(),
+      provider: createDraft.provider,
+      model: createDraft.model.trim() || undefined,
+    });
+  }
+
+  async function saveAgent(event: FormSubmitEvent) {
+    event.preventDefault();
+    if (!selectedAgentId || !editDraft) return;
+    const name = editDraft.name.trim();
+    const role = editDraft.role.trim();
+    if (!name || !role) {
+      setError("AI 名称和角色不能为空");
+      return;
+    }
+
+    setError("");
+    setPending(true);
+    try {
+      const response = await fetch(`/api/rooms/${room.room.id}/agents/${selectedAgentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          role,
+          persona: editDraft.persona.trim(),
+          goal: editDraft.goal.trim(),
+          provider: editDraft.provider,
+          model: editDraft.model.trim(),
+        }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        setError(errorMessage(data, "保存 AI 失败"));
+        return;
+      }
+      if (!isRoomView(data)) {
+        setError("房间数据格式错误");
+        return;
+      }
+      applyRoom(data);
+    } catch {
+      setError("保存 AI 失败");
+    } finally {
+      setPending(false);
+    }
   }
 
   async function sendMessage(event: FormSubmitEvent) {
@@ -345,16 +576,43 @@ export function RoomClient({ initialRoom, providerConfig }: RoomClientProps) {
           )}
 
           <div className="memberList">
-            {sortedMembers.map((participant) => (
-              <div className="member" key={participant.id}>
-                <span className={`avatar avatar-${participant.kind}`}>{avatarLetter(participant.name)}</span>
-                <div className="memberInfo">
-                  <span className="memberName">{participant.name}</span>
-                  <small className="memberKind">{participant.kind === "human" ? "Human" : "AI"}</small>
+            {sortedMembers.map((participant) => {
+              const clickable = participant.kind === "ai" && Boolean(participant.agentId);
+              const isSelected = clickable && participant.agentId === selectedAgentId;
+              const className = [
+                "member",
+                clickable ? "memberClickable" : "",
+                isSelected ? "memberSelected" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return (
+                <div
+                  className={className}
+                  key={participant.id}
+                  onClick={clickable ? () => selectMember(participant) : undefined}
+                  role={clickable ? "button" : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  onKeyDown={
+                    clickable
+                      ? (event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            selectMember(participant);
+                          }
+                        }
+                      : undefined
+                  }
+                >
+                  <span className={`avatar avatar-${participant.kind}`}>{avatarLetter(participant.name)}</span>
+                  <div className="memberInfo">
+                    <span className="memberName">{participant.name}</span>
+                    <small className="memberKind">{participant.kind === "human" ? "Human" : "AI"}</small>
+                  </div>
+                  <small className={`statusPill status-${participant.status}`}>{statusLabel(participant)}</small>
                 </div>
-                <small className={`statusPill status-${participant.status}`}>{statusLabel(participant)}</small>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <button className="ghost paneAction" disabled={pending} onClick={addNextAgent} type="button">
@@ -402,85 +660,232 @@ export function RoomClient({ initialRoom, providerConfig }: RoomClientProps) {
         </section>
 
         <aside className="roomRight">
-          <div className="paneHeader">
-            <h3>议题</h3>
-            <span>Topic</span>
-          </div>
-          <textarea
-            className="goalInput"
-            maxLength={400}
-            onChange={(event) => setDiscussionGoal(event.target.value)}
-            placeholder="一句话描述本轮讨论目标"
-            value={discussionGoal}
-          />
-
-          <div className="paneHeader">
-            <h3>添加 AI</h3>
-            <span>Agent</span>
-          </div>
-          <form className="agentForm" onSubmit={addCustomAgent}>
-            <label className="stackedField" htmlFor="agentName">
-              名称
-              <input
-                id="agentName"
-                maxLength={40}
-                onChange={(event) => setAgentName(event.target.value)}
-                value={agentName}
-              />
-            </label>
-            <label className="stackedField" htmlFor="agentRole">
-              角色
-              <input
-                id="agentRole"
-                maxLength={40}
-                onChange={(event) => setAgentRole(event.target.value)}
-                value={agentRole}
-              />
-            </label>
-            <label className="stackedField" htmlFor="agentPersona">
-              风格
+          {selectedAgent && editDraft ? (
+            <>
+              <div className="paneHeader">
+                <h3>编辑 AI</h3>
+                <button className="ghost paneActionInline" onClick={cancelEdit} type="button">
+                  返回
+                </button>
+              </div>
+              <form className="agentForm" onSubmit={saveAgent}>
+                <label className="stackedField" htmlFor="editTemplate">
+                  风格模板
+                  <select
+                    id="editTemplate"
+                    onChange={(event) => applyEditTemplate(event.target.value)}
+                    value={editTemplateId}
+                  >
+                    {personaTemplates.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="stackedField" htmlFor="editName">
+                  名称
+                  <input
+                    id="editName"
+                    maxLength={40}
+                    onChange={(event) => setEditDraft({ ...editDraft, name: event.target.value })}
+                    value={editDraft.name}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="editRole">
+                  角色
+                  <input
+                    id="editRole"
+                    maxLength={40}
+                    onChange={(event) => setEditDraft({ ...editDraft, role: event.target.value })}
+                    value={editDraft.role}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="editPersona">
+                  风格
+                  <textarea
+                    id="editPersona"
+                    maxLength={400}
+                    onChange={(event) => setEditDraft({ ...editDraft, persona: event.target.value })}
+                    rows={3}
+                    value={editDraft.persona}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="editGoal">
+                  目标
+                  <textarea
+                    id="editGoal"
+                    maxLength={400}
+                    onChange={(event) => setEditDraft({ ...editDraft, goal: event.target.value })}
+                    rows={2}
+                    value={editDraft.goal}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="editProvider">
+                  模型 Provider
+                  <select
+                    id="editProvider"
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      const target = providerConfig.providers.find((entry) => entry.id === next);
+                      setEditDraft({
+                        ...editDraft,
+                        provider: next,
+                        model: target?.defaultModel ?? editDraft.model,
+                      });
+                    }}
+                    value={editDraft.provider}
+                  >
+                    {providerConfig.providers.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.label}
+                        {entry.kind !== "mock" && !entry.configured ? "（未配置 Key）" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="stackedField" htmlFor="editModel">
+                  模型名称
+                  <input
+                    id="editModel"
+                    maxLength={64}
+                    onChange={(event) => setEditDraft({ ...editDraft, model: event.target.value })}
+                    placeholder={editProviderEntry?.defaultModel ?? "默认模型"}
+                    value={editDraft.model}
+                  />
+                </label>
+                <div className="agentFormActions">
+                  <button className="ghost" disabled={pending} onClick={cancelEdit} type="button">
+                    取消
+                  </button>
+                  <button className="primary actionButton" disabled={pending} type="submit">
+                    保存修改
+                  </button>
+                </div>
+              </form>
+            </>
+          ) : (
+            <>
+              <div className="paneHeader">
+                <h3>议题</h3>
+                <span>Topic</span>
+              </div>
               <textarea
-                id="agentPersona"
+                className="goalInput"
                 maxLength={400}
-                onChange={(event) => setAgentPersona(event.target.value)}
-                rows={3}
-                value={agentPersona}
+                onChange={(event) => setDiscussionGoal(event.target.value)}
+                placeholder="一句话描述本轮讨论目标"
+                value={discussionGoal}
               />
-            </label>
-            <label className="stackedField" htmlFor="agentProvider">
-              模型 Provider
-              <select
-                id="agentProvider"
-                onChange={(event) => {
-                  const next = event.target.value as typeof agentProvider;
-                  setAgentProvider(next);
-                  const target = providerConfig.providers.find((entry) => entry.id === next);
-                  if (target) setAgentModel(target.defaultModel);
-                }}
-                value={agentProvider}
-              >
-                {providerConfig.providers.map((entry) => (
-                  <option key={entry.id} value={entry.id}>
-                    {entry.label}
-                    {entry.kind !== "mock" && !entry.configured ? "（未配置 Key）" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="stackedField" htmlFor="agentModel">
-              模型名称
-              <input
-                id="agentModel"
-                maxLength={64}
-                onChange={(event) => setAgentModel(event.target.value)}
-                placeholder={providerDescriptor?.defaultModel ?? "默认模型"}
-                value={agentModel}
-              />
-            </label>
-            <button className="secondary actionButton" disabled={pending} type="submit">
-              添加到房间
-            </button>
-          </form>
+
+              <div className="paneHeader">
+                <h3>添加 AI</h3>
+                <span>Agent</span>
+              </div>
+              <form className="agentForm" onSubmit={addCustomAgent}>
+                <label className="stackedField" htmlFor="createTemplate">
+                  风格模板
+                  <select
+                    id="createTemplate"
+                    onChange={(event) => applyCreateTemplate(event.target.value)}
+                    value={createTemplateId}
+                  >
+                    {personaTemplates.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="stackedField" htmlFor="agentName">
+                  名称
+                  <input
+                    id="agentName"
+                    maxLength={40}
+                    onChange={(event) => {
+                      setCreateDraft({ ...createDraft, name: event.target.value });
+                      setCreateTemplateId("blank");
+                    }}
+                    value={createDraft.name}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="agentRole">
+                  角色
+                  <input
+                    id="agentRole"
+                    maxLength={40}
+                    onChange={(event) => {
+                      setCreateDraft({ ...createDraft, role: event.target.value });
+                      setCreateTemplateId("blank");
+                    }}
+                    value={createDraft.role}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="agentPersona">
+                  风格
+                  <textarea
+                    id="agentPersona"
+                    maxLength={400}
+                    onChange={(event) => {
+                      setCreateDraft({ ...createDraft, persona: event.target.value });
+                      setCreateTemplateId("blank");
+                    }}
+                    rows={3}
+                    value={createDraft.persona}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="agentGoal">
+                  目标
+                  <textarea
+                    id="agentGoal"
+                    maxLength={400}
+                    onChange={(event) => {
+                      setCreateDraft({ ...createDraft, goal: event.target.value });
+                      setCreateTemplateId("blank");
+                    }}
+                    rows={2}
+                    value={createDraft.goal}
+                  />
+                </label>
+                <label className="stackedField" htmlFor="agentProvider">
+                  模型 Provider
+                  <select
+                    id="agentProvider"
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      const target = providerConfig.providers.find((entry) => entry.id === next);
+                      setCreateDraft({
+                        ...createDraft,
+                        provider: next,
+                        model: target?.defaultModel ?? createDraft.model,
+                      });
+                    }}
+                    value={createDraft.provider}
+                  >
+                    {providerConfig.providers.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.label}
+                        {entry.kind !== "mock" && !entry.configured ? "（未配置 Key）" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="stackedField" htmlFor="agentModel">
+                  模型名称
+                  <input
+                    id="agentModel"
+                    maxLength={64}
+                    onChange={(event) => setCreateDraft({ ...createDraft, model: event.target.value })}
+                    placeholder={createProviderEntry?.defaultModel ?? "默认模型"}
+                    value={createDraft.model}
+                  />
+                </label>
+                <button className="secondary actionButton" disabled={pending} type="submit">
+                  添加到房间
+                </button>
+              </form>
+            </>
+          )}
 
           <div className="paneFooter">
             <div>

@@ -25,6 +25,21 @@ export async function addAgent(
   return hasDatabase() ? dbStore.addAgent(roomId, input) : memoryStore.addAgent(roomId, input);
 }
 
+export type AgentUpdate = {
+  name?: string;
+  role?: string;
+  persona?: string;
+  goal?: string;
+  provider?: string;
+  model?: string;
+  temperature?: number;
+  enabled?: boolean;
+};
+
+export async function updateAgent(roomId: string, agentId: string, input: AgentUpdate) {
+  return hasDatabase() ? dbStore.updateAgent(roomId, agentId, input) : memoryStore.updateAgent(roomId, agentId, input);
+}
+
 export async function addMessage(roomId: string, input: { content: string; senderId?: string }) {
   return hasDatabase() ? dbStore.addMessage(roomId, input) : memoryStore.addMessage(roomId, input);
 }

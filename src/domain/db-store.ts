@@ -312,6 +312,43 @@ export async function addAgent(
   return roomView(roomId) as Promise<RoomView>;
 }
 
+export async function updateAgent(
+  roomId: string,
+  agentId: string,
+  input: { name?: string; role?: string; persona?: string; goal?: string; provider?: string; model?: string; temperature?: number; enabled?: boolean },
+) {
+  const prisma = getPrisma();
+  if (!prisma) return undefined;
+
+  const existing = await prisma.agent.findUnique({ where: { id: agentId } });
+  if (!existing) return undefined;
+
+  const nextProvider = input.provider !== undefined ? normalizeProvider(input.provider) : (existing.provider as Agent["provider"]);
+  const nextName = input.name !== undefined ? cleanText(input.name, ROOM_LIMITS.name) || existing.name : existing.name;
+  const data: Partial<DbAgent> = {
+    name: nextName,
+    role: input.role !== undefined ? cleanText(input.role, ROOM_LIMITS.role) || existing.role : existing.role,
+    persona: input.persona !== undefined ? cleanText(input.persona, ROOM_LIMITS.profile) || existing.persona : existing.persona,
+    goal: input.goal !== undefined ? cleanText(input.goal, ROOM_LIMITS.profile) || existing.goal : existing.goal,
+    provider: nextProvider,
+    model: input.model !== undefined ? cleanText(input.model, ROOM_LIMITS.name) || defaultModelForProvider(nextProvider) : existing.model,
+    temperature: typeof input.temperature === "number" ? Math.min(1, Math.max(0, input.temperature)) : existing.temperature,
+    enabled: typeof input.enabled === "boolean" ? input.enabled : existing.enabled,
+  };
+
+  const updatedAt = now();
+  await prisma.$transaction(async (tx) => {
+    await tx.agent.update({ where: { id: agentId }, data });
+    if (data.name && data.name !== existing.name) {
+      await tx.participant.updateMany({ where: { roomId, agentId }, data: { name: data.name } });
+    }
+    await tx.room.update({ where: { id: roomId }, data: { updatedAt } });
+    await addEvent(tx, roomId, "agent.updated", { agentId, name: data.name, role: data.role });
+  });
+
+  return roomView(roomId) as Promise<RoomView>;
+}
+
 export async function addMessage(roomId: string, input: { content: string; senderId?: string }) {
   const prisma = getPrisma();
   if (!prisma) return undefined;

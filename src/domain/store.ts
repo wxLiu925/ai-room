@@ -203,6 +203,50 @@ export function addAgent(
   return view(roomId) as RoomView;
 }
 
+export function updateAgent(
+  roomId: string,
+  agentId: string,
+  input: { name?: string; role?: string; persona?: string; goal?: string; provider?: string; model?: string; temperature?: number; enabled?: boolean },
+) {
+  const room = state.rooms.get(roomId);
+  if (!room) return undefined;
+
+  const agent = state.agents.get(agentId);
+  if (!agent) return undefined;
+
+  const nextProvider = input.provider !== undefined ? normalizeProvider(input.provider) : agent.provider;
+  const nextName = input.name !== undefined ? cleanText(input.name, ROOM_LIMITS.name) || agent.name : agent.name;
+  const next: Agent = {
+    ...agent,
+    name: nextName,
+    role: input.role !== undefined ? cleanText(input.role, ROOM_LIMITS.role) || agent.role : agent.role,
+    persona: input.persona !== undefined ? cleanText(input.persona, ROOM_LIMITS.profile) || agent.persona : agent.persona,
+    goal: input.goal !== undefined ? cleanText(input.goal, ROOM_LIMITS.profile) || agent.goal : agent.goal,
+    provider: nextProvider,
+    model: input.model !== undefined ? cleanText(input.model, ROOM_LIMITS.name) || defaultModelForProvider(nextProvider) : agent.model,
+    temperature: typeof input.temperature === "number" ? Math.min(1, Math.max(0, input.temperature)) : agent.temperature,
+    enabled: typeof input.enabled === "boolean" ? input.enabled : agent.enabled,
+  };
+
+  state.agents.set(agentId, next);
+
+  const participants = state.participants.get(roomId) ?? [];
+  if (nextName !== agent.name) {
+    state.participants.set(
+      roomId,
+      participants.map((participant) =>
+        participant.agentId === agentId ? { ...participant, name: nextName } : participant,
+      ),
+    );
+  }
+
+  const updatedAt = now();
+  state.rooms.set(roomId, { ...room, updatedAt });
+  event(roomId, "agent.updated", { agentId, name: next.name, role: next.role });
+
+  return view(roomId) as RoomView;
+}
+
 export function addMessage(roomId: string, input: { content: string; senderId?: string }) {
   const room = state.rooms.get(roomId);
   if (!room) return undefined;

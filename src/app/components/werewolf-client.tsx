@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 import type { GameSession, GameSystemEvent } from "@/domain/game-types";
 import type { ProviderClientConfig } from "@/domain/provider";
-import type { Participant, RoomView } from "@/domain/types";
+import type { AgentProvider, Participant, RoomView } from "@/domain/types";
 
 type FormSubmitEvent = Parameters<NonNullable<ComponentProps<"form">["onSubmit"]>>[0];
 
@@ -21,13 +21,29 @@ type WerewolfState = {
   lastEliminated?: { participantId: string; reason: "night_kill" | "vote_out" } | null;
 };
 
-const defaultAgentSeats = [
-  { name: "ChatGPT", role: "AI 玩家", persona: "理性发言，引导逻辑分析。" },
-  { name: "Claude", role: "AI 玩家", persona: "稳健保守，注重证据。" },
-  { name: "Gemini", role: "AI 玩家", persona: "整合各方意见，强调风险点。" },
-  { name: "Deepseek", role: "AI 玩家", persona: "直觉派，主动挑战质疑。" },
-  { name: "Grok", role: "AI 玩家", persona: "节奏活跃，制造话题。" },
-  { name: "Qwen", role: "AI 玩家", persona: "细致谨慎，重视细节。" },
+type DefaultSeat = {
+  name: string;
+  role: string;
+  persona: string;
+  preferredProvider: AgentProvider;
+};
+
+type AgentDraft = {
+  name: string;
+  role: string;
+  persona: string;
+  goal: string;
+  provider: AgentProvider;
+  model: string;
+};
+
+const defaultAgentSeats: DefaultSeat[] = [
+  { name: "ChatGPT", role: "AI 玩家", persona: "理性发言，引导逻辑分析。", preferredProvider: "openai" },
+  { name: "Gemini", role: "AI 玩家", persona: "整合各方意见，强调风险点。", preferredProvider: "gemini" },
+  { name: "Deepseek", role: "AI 玩家", persona: "直觉派，主动挑战质疑。", preferredProvider: "deepseek" },
+  { name: "Grok", role: "AI 玩家", persona: "节奏活跃，制造话题。", preferredProvider: "grok" },
+  { name: "Qwen", role: "AI 玩家", persona: "细致谨慎，重视细节。", preferredProvider: "qwen" },
+  { name: "Mocky", role: "AI 玩家", persona: "陪练替补玩家。", preferredProvider: "mock" },
 ];
 
 const phaseLabels: Record<string, string> = {
@@ -79,7 +95,7 @@ function eventBubble(room: RoomView, event: GameSystemEvent): { text: string; ic
     case "game.ended":
       return { text: payload.winner === "werewolf" ? "🐺 狼人阵营胜利！" : "🛡 村民阵营胜利！", icon: "🏁" };
     case "player.said":
-      return undefined; // 渲染为发言段
+      return undefined;
     case "player.voted":
       return { text: `${payload.name} 投出了一票。`, icon: "🗳" };
     case "seer.checked.private":
@@ -97,13 +113,25 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
   const [session, setSession] = useState<GameSession | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [composer, setComposer] = useState("");
-  const [agentProvider, setAgentProvider] = useState(providerConfig.defaultProvider);
+  const [agentProvider, setAgentProvider] = useState<AgentProvider>(providerConfig.defaultProvider);
   const providerDescriptor = useMemo(
     () => providerConfig.providers.find((entry) => entry.id === agentProvider) ?? providerConfig.providers[0],
     [agentProvider, providerConfig.providers],
   );
   const [agentModel, setAgentModel] = useState(providerDescriptor?.defaultModel ?? "");
+
+  const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<AgentDraft | null>(null);
+  const editProviderEntry = useMemo(
+    () =>
+      editDraft
+        ? providerConfig.providers.find((entry) => entry.id === editDraft.provider) ?? providerConfig.providers[0]
+        : null,
+    [editDraft, providerConfig.providers],
+  );
+
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const lastSeqRef = useRef(Math.max(0, ...initialRoom.events.map((event) => event.seq)));
@@ -126,6 +154,18 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
   const phase = session?.phase ?? "lobby";
   const state = (session?.state ?? {}) as WerewolfState;
   const round = state.round ?? 0;
+
+  const editingAgent = useMemo(
+    () => (editingAgentId ? room.agents.find((agent) => agent.id === editingAgentId) ?? null : null),
+    [editingAgentId, room.agents],
+  );
+
+  useEffect(() => {
+    if (editingAgentId && !editingAgent) {
+      setEditingAgentId(null);
+      setEditDraft(null);
+    }
+  }, [editingAgentId, editingAgent]);
 
   const applyRoom = useCallback((nextRoom: RoomView) => {
     const nextSeq = Math.max(0, ...nextRoom.events.map((event) => event.seq));
@@ -177,24 +217,114 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
     if (list) list.scrollTop = list.scrollHeight;
   }, [session?.events.length]);
 
+  function resolveSeatProvider(seat: DefaultSeat) {
+    const preferred = providerConfig.providers.find((entry) => entry.id === seat.preferredProvider);
+    const usable = preferred && (preferred.kind === "mock" || preferred.configured);
+    if (usable && preferred) {
+      return {
+        provider: preferred.id,
+        model: preferred.defaultModel,
+        fallback: null as string | null,
+      };
+    }
+    return {
+      provider: agentProvider,
+      model: agentModel.trim() || providerDescriptor?.defaultModel || "",
+      fallback: seat.preferredProvider,
+    };
+  }
+
   async function addDefaultAgents(targetCount: number) {
     setPending(true);
     setError("");
+    setNotice("");
+    const fellBack: string[] = [];
     try {
       const existing = room.participants.filter((participant) => participant.kind === "ai").length;
       const need = Math.max(0, targetCount - existing);
       for (let i = 0; i < need; i += 1) {
-        const agent = defaultAgentSeats[(existing + i) % defaultAgentSeats.length];
+        const seat = defaultAgentSeats[(existing + i) % defaultAgentSeats.length];
+        const resolved = resolveSeatProvider(seat);
+        if (resolved.fallback) {
+          fellBack.push(`${seat.name}（${resolved.fallback} 未配置 → ${resolved.provider}）`);
+        }
         const response = await fetch(`/api/rooms/${room.room.id}/agents`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...agent, provider: agentProvider, model: agentModel.trim() || undefined }),
+          body: JSON.stringify({
+            name: seat.name,
+            role: seat.role,
+            persona: seat.persona,
+            provider: resolved.provider,
+            model: resolved.model || undefined,
+          }),
         });
         const data = (await response.json().catch(() => null)) as RoomView | null;
         if (response.ok && data?.room) applyRoom(data);
       }
+      if (fellBack.length) {
+        setNotice(`部分 AI 偏好的 provider 未配置，已自动回退：${fellBack.join("、")}`);
+      }
     } catch {
       setError("添加 AI 玩家失败");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function openAgentEditor(agentId: string) {
+    const agent = room.agents.find((entry) => entry.id === agentId);
+    if (!agent) return;
+    setEditingAgentId(agent.id);
+    setEditDraft({
+      name: agent.name,
+      role: agent.role,
+      persona: agent.persona,
+      goal: agent.goal,
+      provider: agent.provider,
+      model: agent.model,
+    });
+    setError("");
+  }
+
+  function closeAgentEditor() {
+    setEditingAgentId(null);
+    setEditDraft(null);
+  }
+
+  async function saveAgent(event: FormSubmitEvent) {
+    event.preventDefault();
+    if (!editingAgentId || !editDraft) return;
+    const name = editDraft.name.trim();
+    if (!name) {
+      setError("名称不能为空");
+      return;
+    }
+    setPending(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/rooms/${room.room.id}/agents/${editingAgentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          role: editDraft.role.trim() || "AI 玩家",
+          persona: editDraft.persona.trim(),
+          goal: editDraft.goal.trim(),
+          provider: editDraft.provider,
+          model: editDraft.model.trim(),
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as RoomView | { error?: string } | null;
+      if (!response.ok || !data || !("room" in data)) {
+        const errText = (data as { error?: string })?.error ?? "保存失败";
+        setError(errText);
+        return;
+      }
+      applyRoom(data as RoomView);
+      closeAgentEditor();
+    } catch {
+      setError("保存失败");
     } finally {
       setPending(false);
     }
@@ -440,6 +570,21 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
     return <div className="ww-actionHint">等待 AI 行动中…</div>;
   })();
 
+  function providerLabel(providerId: AgentProvider | string) {
+    return providerConfig.providers.find((entry) => entry.id === providerId)?.label ?? providerId;
+  }
+
+  function seatProviderTag(participant: Participant) {
+    if (participant.kind !== "ai" || !participant.agentId) return null;
+    const agent = room.agents.find((entry) => entry.id === participant.agentId);
+    if (!agent) return null;
+    return (
+      <small className="ww-seatProvider" title={`${providerLabel(agent.provider)} · ${agent.model}`}>
+        {providerLabel(agent.provider)}
+      </small>
+    );
+  }
+
   const lobbyScreen = !session && (
     <div className="ww-lobby">
       <div className="ww-lobbyCard">
@@ -447,24 +592,54 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
         <h2>{room.room.title}</h2>
         <p className="ww-lobbyDesc">
           当前 {room.participants.length} 名玩家（含 {room.participants.filter((participant: Participant) => participant.kind === "ai").length} 位 AI）。
-          建议 5–8 人对局，少于 4 人无法开始。
+          建议 5–8 人对局，少于 4 人无法开始。点击 AI 座位可单独编辑模型与风格。
         </p>
         <div className="ww-seatGrid">
-          {room.participants.map((participant) => (
-            <div className={`ww-seat ww-seat-${participant.kind}`} key={participant.id}>
-              <span>{participant.kind === "human" ? "👤" : "🤖"}</span>
-              <strong>{participant.name}</strong>
-              <small>{participant.kind === "human" ? "你" : "AI"}</small>
-            </div>
-          ))}
+          {room.participants.map((participant) => {
+            const clickable = participant.kind === "ai" && Boolean(participant.agentId);
+            const className = [
+              "ww-seat",
+              `ww-seat-${participant.kind}`,
+              clickable ? "ww-seatClickable" : "",
+              clickable && participant.agentId === editingAgentId ? "ww-seatSelected" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <div
+                className={className}
+                key={participant.id}
+                onClick={clickable && participant.agentId ? () => openAgentEditor(participant.agentId!) : undefined}
+                role={clickable ? "button" : undefined}
+                tabIndex={clickable ? 0 : undefined}
+                onKeyDown={
+                  clickable && participant.agentId
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openAgentEditor(participant.agentId!);
+                        }
+                      }
+                    : undefined
+                }
+              >
+                <span>{participant.kind === "human" ? "👤" : "🤖"}</span>
+                <div className="ww-seatInfo">
+                  <strong>{participant.name}</strong>
+                  {seatProviderTag(participant)}
+                </div>
+                <small>{participant.kind === "human" ? "你" : "AI"}</small>
+              </div>
+            );
+          })}
         </div>
         <div className="ww-lobbyActions">
           <label className="stackedField ww-providerField" htmlFor="wwAgentProvider">
-            AI 模型 Provider
+            回退 Provider
             <select
               id="wwAgentProvider"
               onChange={(event) => {
-                const next = event.target.value as typeof agentProvider;
+                const next = event.target.value as AgentProvider;
                 setAgentProvider(next);
                 const target = providerConfig.providers.find((entry) => entry.id === next);
                 if (target) setAgentModel(target.defaultModel);
@@ -480,7 +655,7 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
             </select>
           </label>
           <label className="stackedField ww-providerField" htmlFor="wwAgentModel">
-            模型名称
+            回退模型
             <input
               id="wwAgentModel"
               maxLength={64}
@@ -496,10 +671,87 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
             {pending ? "准备中…" : "开始狼人杀"}
           </button>
         </div>
+        {notice ? <p className="ww-notice">{notice}</p> : null}
         {error ? <p className="formError">{error}</p> : null}
       </div>
     </div>
   );
+
+  const editorOverlay = editingAgent && editDraft ? (
+    <div className="ww-editorOverlay" onClick={closeAgentEditor} role="presentation">
+      <div className="ww-editorCard" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="ww-editorHeader">
+          <h3>编辑 {editingAgent.name}</h3>
+          <button className="ghost" onClick={closeAgentEditor} type="button">
+            关闭
+          </button>
+        </div>
+        <form className="agentForm" onSubmit={saveAgent}>
+          <label className="stackedField" htmlFor="wwEditName">
+            名称
+            <input
+              id="wwEditName"
+              maxLength={40}
+              onChange={(event) => setEditDraft({ ...editDraft, name: event.target.value })}
+              value={editDraft.name}
+            />
+          </label>
+          <label className="stackedField" htmlFor="wwEditPersona">
+            风格 / 性格
+            <textarea
+              id="wwEditPersona"
+              maxLength={400}
+              onChange={(event) => setEditDraft({ ...editDraft, persona: event.target.value })}
+              rows={3}
+              value={editDraft.persona}
+            />
+          </label>
+          <label className="stackedField" htmlFor="wwEditProvider">
+            Provider
+            <select
+              id="wwEditProvider"
+              onChange={(event) => {
+                const next = event.target.value as AgentProvider;
+                const target = providerConfig.providers.find((entry) => entry.id === next);
+                setEditDraft({
+                  ...editDraft,
+                  provider: next,
+                  model: target?.defaultModel ?? editDraft.model,
+                });
+              }}
+              value={editDraft.provider}
+            >
+              {providerConfig.providers.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.label}
+                  {entry.kind !== "mock" && !entry.configured ? "（未配置 Key）" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="stackedField" htmlFor="wwEditModel">
+            模型名称
+            <input
+              id="wwEditModel"
+              maxLength={64}
+              onChange={(event) => setEditDraft({ ...editDraft, model: event.target.value })}
+              placeholder={editProviderEntry?.defaultModel ?? "默认模型"}
+              value={editDraft.model}
+            />
+          </label>
+          <div className="agentFormActions">
+            <button className="ghost" disabled={pending} onClick={closeAgentEditor} type="button">
+              取消
+            </button>
+            <button className="primary actionButton" disabled={pending} type="submit">
+              保存
+            </button>
+          </div>
+          {error ? <p className="formError">{error}</p> : null}
+        </form>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="ww-layout">
@@ -555,12 +807,17 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
                 const name = nameByParticipantId(room, player.participantId);
                 const isMe = player.participantId === viewerId;
                 const showRole = player.role !== "hidden";
+                const participant = room.participants.find((entry) => entry.id === player.participantId);
+                const agent = participant?.agentId
+                  ? room.agents.find((entry) => entry.id === participant.agentId)
+                  : undefined;
                 return (
                   <div className={`ww-player ${player.alive ? "" : "ww-dead"}`} key={player.participantId}>
                     <span className={`ww-dot ww-dot-${player.alive ? "alive" : "dead"}`} />
                     <span className="ww-playerName">
                       {name}
                       {isMe ? <small> · 你</small> : null}
+                      {agent ? <small className="ww-playerProvider"> · {providerLabel(agent.provider)}</small> : null}
                     </span>
                     {showRole ? <span className={`ww-roleTag ww-role-${player.role}`}>{roleIcons[player.role]}</span> : null}
                   </div>
@@ -578,6 +835,8 @@ export function WerewolfClient({ initialRoom, providerConfig }: WerewolfClientPr
           </main>
         </div>
       ) : null}
+
+      {editorOverlay}
     </div>
   );
 }
